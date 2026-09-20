@@ -1434,7 +1434,19 @@ document.addEventListener('pointerdown', function wake() {
         snd('pour'); buzz(8);
       }
     }
+    fixDir(b);                           /* 모서리에 맞아 반사각이 거의 수평이 되면 좌우 벽만 영원히 왕복한다 — 위아래 속도 바닥을 둔다 */
     return b.y - ballR > canvasH;        /* 패들을 못 맞히고 화면 밖까지 떨어지면 회수 */
+  }
+  const MIN_DY = 0.22;
+  function fixDir(b) {
+    const len = Math.hypot(b.dx, b.dy) || 1;
+    let dx = b.dx / len, dy = b.dy / len;
+    if (Math.abs(dy) < MIN_DY) {
+      dy = dy < 0 ? -MIN_DY : MIN_DY;
+      const len2 = Math.hypot(dx, dy);
+      dx /= len2; dy /= len2;
+    }
+    b.dx = dx; b.dy = dy;
   }
   function collideBrick(b) {
     const col0 = Math.max(0, Math.floor((b.x - ballR) / cell)), col1 = Math.min(COLS - 1, Math.floor((b.x + ballR) / cell));
