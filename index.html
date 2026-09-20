@@ -1396,6 +1396,10 @@ document.addEventListener('pointerdown', function wake() {
     round = 1; score = 0; ballCount = 1; over = false;
     grid[0] = genRow(); grid[1] = genRow(); grid[2] = genRow();
   }
+  function gridEmpty() {
+    for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (grid[r][c]) return false;
+    return true;
+  }
   function nextRound() {
     round++;
     const popped = grid[ROWS - 1];               /* 발사대에 가장 가까운 줄 — 여기 벽돌이 있으면 끝 */
@@ -1504,7 +1508,11 @@ document.addEventListener('pointerdown', function wake() {
         if (launchTimer <= 0) { spawnBall(); queue--; launchTimer = staggerMs(); }
       }
       for (let i = active.length - 1; i >= 0; i--) if (stepBall(active[i], dt)) active.splice(i, 1);
-      if (queue <= 0 && active.length === 0) { phase = 'settle'; setTimeout(nextRound, 120); }
+      if (gridEmpty()) {                    /* 더 깰 벽돌이 없으면 굳이 공을 놓칠 때까지 기다리지 않는다 */
+        phase = 'settle'; queue = 0; active = [];
+        score += 30 + round * 4; snd('win'); toast('판을 다 깼어요!');
+        setTimeout(nextRound, 200);
+      } else if (queue <= 0 && active.length === 0) { phase = 'settle'; setTimeout(nextRound, 120); }
     }
     draw();
     raf = requestAnimationFrame(loop);
