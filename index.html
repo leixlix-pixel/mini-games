@@ -220,6 +220,10 @@ button{font-family:inherit; color:inherit; border:none; background:none; cursor:
 .piece i{border-radius:3px; background:var(--c); display:block}
 .piece i.o{background:transparent}
 #bpDrag{position:fixed; z-index:40; pointer-events:none; display:none}
+
+/* ---------- 구슬 벽돌깨기 ---------- */
+#bbBoard{background:#1b2433; border-radius:14px; overflow:hidden; touch-action:none; line-height:0}
+#bbCanvas{display:block; touch-action:none}
 </style>
 </head>
 <body>
@@ -1351,6 +1355,259 @@ document.addEventListener('pointerdown', function wake() {
       window.removeEventListener('pointerup', endDrag);
       window.removeEventListener('pointercancel', endDrag);
       $('#bpDrag').style.display = 'none'; drag = null; persist();
+    }
+  };
+})();
+
+/* ===================================================================
+   5. 구슬 벽돌깨기
+   =================================================================== */
+(function () {
+  const COLS = 6, ROWS = 9, LAUNCH_GAP_ROWS = 1.25;
+
+  let grid = [], round = 1, score = 0, ballCount = 1, over = false;
+  let cell = 30, boardW = 0, boardH = 0, launchY = 0, canvasH = 0, ballR = 5, speed = 300;
+  let canvas = null, ctx = null, raf = null, lastT = 0;
+  let phase = 'aim';               // 'aim' | 'fire'
+  let aimDx = 0, aimDy = -1, dragging = false;
+  let queue = 0, active = [], launchTimer = 0;
+
+  /* ---- 판 만들기 ---- */
+  function genRow() {
+    const row = new Array(COLS).fill(null);
+    const fillChance = Math.min(0.5 + round * 0.012, 0.88);
+    const maxHp = Math.min(2 + Math.floor(round / 2), 40);
+    const minHp = Math.max(1, Math.floor(round / 5));
+    let any = false;
+    for (let c = 0; c < COLS; c++) {
+      if (Math.random() >= fillChance) continue;
+      any = true;
+      const roll = Math.random();
+      if (roll < 0.07) row[c] = { t: 'p', n: 1 + ri(3) };
+      else if (roll < 0.13) row[c] = { t: 's', v: 20 + round * 4 };
+      else row[c] = { t: 'b', hp: minHp + ri(maxHp - minHp + 1) };
+    }
+    if (!any) row[ri(COLS)] = { t: 'b', hp: minHp };
+    return row;
+  }
+  function freshGrid() {
+    grid = Array.from({ length: ROWS }, () => new Array(COLS).fill(null));
+    round = 1; score = 0; ballCount = 1; over = false;
+    grid[0] = genRow(); grid[1] = genRow(); grid[2] = genRow();
+  }
+  function nextRound() {
+    round++;
+    const popped = grid[ROWS - 1];               /* 발사대에 가장 가까운 줄 — 여기 벽돌이 있으면 끝 */
+    grid = grid.slice(0, ROWS - 1);
+    grid.unshift(genRow());
+    if (popped && popped.some(Boolean)) { gameOver(); return; }
+    phase = 'aim'; persist(); hud();
+  }
+
+  /* ---- 발사 ---- */
+  function fire() {
+    if (phase !== 'aim' || over) return;
+    phase = 'fire'; queue = ballCount; active = []; launchTimer = 0;
+    snd('pick');
+  }
+  function spawnBall() { active.push({ x: boardW / 2, y: launchY - ballR - 1, dx: aimDx, dy: aimDy }); }
+  const staggerMs = () => Math.max(26, 85 - ballCount);
+
+  function stepBall(b, dt) {
+    b.x += b.dx * speed * dt; b.y += b.dy * speed * dt;
+    if (b.x < ballR) { b.x = ballR; b.dx = Math.abs(b.dx); }
+    else if (b.x > boardW - ballR) { b.x = boardW - ballR; b.dx = -Math.abs(b.dx); }
+    if (b.y < ballR) { b.y = ballR; b.dy = Math.abs(b.dy); }
+    collideBrick(b);
+    return b.y - ballR > launchY;        /* 발사선 아래로 완전히 내려가야 회수된다 */
+  }
+  function collideBrick(b) {
+    const col0 = Math.max(0, Math.floor((b.x - ballR) / cell)), col1 = Math.min(COLS - 1, Math.floor((b.x + ballR) / cell));
+    const row0 = Math.max(0, Math.floor((b.y - ballR) / cell)), row1 = Math.min(ROWS - 1, Math.floor((b.y + ballR) / cell));
+    for (let row = row0; row <= row1; row++) {
+      for (let col = col0; col <= col1; col++) {
+        const c = grid[row][col]; if (!c) continue;
+        const rx = col * cell, ry = row * cell;
+        const cx = clamp(b.x, rx, rx + cell), cy = clamp(b.y, ry, ry + cell);
+        const dx = b.x - cx, dy = b.y - cy, d2 = dx * dx + dy * dy;
+        if (d2 >= ballR * ballR) continue;
+        const d = Math.sqrt(d2) || 0.001, nx = dx / d, ny = dy / d;
+        const dot = b.dx * nx + b.dy * ny;
+        b.dx -= 2 * dot * nx; b.dy -= 2 * dot * ny;
+        b.x = cx + nx * ballR; b.y = cy + ny * ballR;
+        hitCell(row, col);
+        return;                                   /* 한 프레임에 한 벽돌만 — 겹친 벽돌은 다음 프레임에 */
+      }
+    }
+  }
+  function hitCell(row, col) {
+    const c = grid[row][col];
+    if (c.t === 'b') {
+      c.hp--; snd('tap');
+      if (c.hp <= 0) { grid[row][col] = null; score += 10; snd('clear'); }
+      else score += 2;
+    } else if (c.t === 'p') {
+      grid[row][col] = null; ballCount += c.n; queue += c.n; score += 5; snd('good'); toast('공 +' + c.n);
+    } else if (c.t === 's') {
+      grid[row][col] = null; score += c.v; snd('good');
+    }
+    hudVal(0, score);
+  }
+
+  /* ---- 조준 ---- */
+  function toLocal(e) { const r = canvas.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
+  function updateAim(e) {
+    const p = toLocal(e);
+    const ang = clamp(Math.atan2(p.x - boardW / 2, launchY - p.y), -75 * Math.PI / 180, 75 * Math.PI / 180);
+    aimDx = Math.sin(ang); aimDy = -Math.cos(ang);
+  }
+  function onDown(e) { if (phase !== 'aim' || over) return; dragging = true; updateAim(e); }
+  function onMove(e) { if (dragging) updateAim(e); }
+  function onUp() { if (!dragging) return; dragging = false; fire(); }
+
+  /* ---- 루프 ---- */
+  function loop(t) {
+    if (!lastT) lastT = t;
+    const dt = Math.min((t - lastT) / 1000, 0.032); lastT = t;
+    if (phase === 'fire') {
+      if (queue > 0) {
+        launchTimer -= dt * 1000;
+        if (launchTimer <= 0) { spawnBall(); queue--; launchTimer = staggerMs(); }
+      }
+      for (let i = active.length - 1; i >= 0; i--) if (stepBall(active[i], dt)) active.splice(i, 1);
+      if (queue <= 0 && active.length === 0) { phase = 'settle'; setTimeout(nextRound, 120); }
+    }
+    draw();
+    raf = requestAnimationFrame(loop);
+  }
+
+  /* ---- 그리기 ---- */
+  function mixColor(t) {
+    const a = [96, 165, 250], b = [248, 113, 113];
+    return 'rgb(' + Math.round(a[0] + (b[0] - a[0]) * t) + ',' + Math.round(a[1] + (b[1] - a[1]) * t) + ',' + Math.round(a[2] + (b[2] - a[2]) * t) + ')';
+  }
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath(); ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+  }
+  function star(cx, cy, rO, rI) {
+    ctx.beginPath();
+    for (let i = 0; i < 10; i++) {
+      const r = i % 2 ? rI : rO, a = -Math.PI / 2 + i * Math.PI / 5;
+      const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    }
+    ctx.closePath();
+  }
+  function drawCell(c, x, y) {
+    const p = 1.5;
+    if (c.t === 'b') {
+      ctx.fillStyle = mixColor(clamp(c.hp / 14, 0, 1));
+      roundRect(x + p, y + p, cell - p * 2, cell - p * 2, 6); ctx.fill();
+      ctx.fillStyle = '#0b1220'; ctx.font = '700 ' + Math.round(cell * .42) + 'px sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(c.hp, x + cell / 2, y + cell / 2 + 1);
+    } else if (c.t === 'p') {
+      ctx.fillStyle = '#4ade80'; ctx.beginPath(); ctx.arc(x + cell / 2, y + cell / 2, cell * .38, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#06240f'; ctx.font = '800 ' + Math.round(cell * .32) + 'px sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('+' + c.n, x + cell / 2, y + cell / 2 + 1);
+    } else if (c.t === 's') {
+      ctx.fillStyle = '#fbbf24'; star(x + cell / 2, y + cell / 2, cell * .34, cell * .15); ctx.fill();
+    }
+  }
+  function draw() {
+    ctx.clearRect(0, 0, boardW, canvasH);
+    ctx.strokeStyle = 'rgba(255,255,255,.05)'; ctx.lineWidth = 1;
+    for (let c = 1; c < COLS; c++) { ctx.beginPath(); ctx.moveTo(c * cell, 0); ctx.lineTo(c * cell, boardH); ctx.stroke(); }
+    ctx.strokeStyle = 'rgba(248,113,113,.35)';
+    ctx.beginPath(); ctx.moveTo(0, (ROWS - 1) * cell); ctx.lineTo(boardW, (ROWS - 1) * cell); ctx.stroke();
+    for (let row = 0; row < ROWS; row++) for (let col = 0; col < COLS; col++) { const c = grid[row][col]; if (c) drawCell(c, col * cell, row * cell); }
+
+    ctx.fillStyle = '#60a5fa';
+    ctx.beginPath();
+    ctx.moveTo(boardW / 2 - cell * .22, launchY + cell * .28);
+    ctx.lineTo(boardW / 2 + cell * .22, launchY + cell * .28);
+    ctx.lineTo(boardW / 2, launchY - cell * .05);
+    ctx.closePath(); ctx.fill();
+
+    if (phase === 'aim') {
+      ctx.setLineDash([6, 7]); ctx.strokeStyle = 'rgba(255,255,255,.55)'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(boardW / 2, launchY);
+      ctx.lineTo(boardW / 2 + aimDx * Math.min(boardH * .55, 260), launchY + aimDy * Math.min(boardH * .55, 260));
+      ctx.stroke(); ctx.setLineDash([]);
+    }
+    ctx.fillStyle = '#fff';
+    active.forEach(b => { ctx.beginPath(); ctx.arc(b.x, b.y, ballR, 0, Math.PI * 2); ctx.fill(); });
+  }
+
+  /* ---- 배치·저장 ---- */
+  function layout() {
+    const bx = stageBox();
+    const w = Math.min(bx.w, 420);
+    cell = Math.max(24, Math.min(Math.floor(w / COLS), Math.floor(bx.h / (ROWS + LAUNCH_GAP_ROWS))));
+    boardW = cell * COLS; boardH = cell * ROWS; launchY = boardH;
+    canvasH = boardH + Math.round(cell * LAUNCH_GAP_ROWS);
+    canvas.width = boardW; canvas.height = canvasH;
+    canvas.style.width = boardW + 'px'; canvas.style.height = canvasH + 'px';
+    ballR = Math.max(3, cell * .15); speed = cell * 9;
+  }
+  function persist() { if (over) { drop('bb'); return; } save('bb', { grid, round, score, ballCount }); }
+  function hud() {
+    const best = Math.max(load('bbBest', 0), score);
+    if (score > load('bbBest', 0)) save('bbBest', score);
+    setHud([{ k: '점수', v: score }, { k: '라운드', v: round }, { k: '공', v: ballCount }, { k: '최고 점수', v: best, hi: true }]);
+    setAct('A', null);
+    setAct('B', {
+      t: '⟳ 새로', fn: () => modal({
+        em: '🔄', h: '새로 시작', p: '지금 판을 버리고 처음부터 합니다.',
+        btns: [{ t: '새 판', cls: 'primary', fn: () => { freshGrid(); phase = 'aim'; hud(); persist(); } }, { t: '그만두기' }]
+      })
+    });
+  }
+  function gameOver() {
+    over = true; phase = 'over';
+    const best = load('bbBest', 0);
+    if (score > best) save('bbBest', score);
+    drop('bb'); snd('bad'); buzz(80); hud();
+    modal({
+      em: '💥', h: '바닥에 닿았어요',
+      p: '라운드 <b>' + round + '</b> · 점수 <b>' + score + '</b>' + (score >= best ? ' · 최고 기록!' : ' · 최고 ' + best),
+      btns: [{ t: '다시 하기', cls: 'primary', fn: () => { freshGrid(); phase = 'aim'; hud(); persist(); } }, { t: '그만하기', fn: () => history.back() }]
+    });
+  }
+
+  GAMES.bb = {
+    key: 'bb', name: '구슬 벽돌깨기', sub: '튕겨서 벽돌을 부순다',
+    desc: '구슬을 쏘아 벽돌을 깬다. 벽돌이 바닥에 닿기 전에!', tint: '#60a5fa',
+    icon: '<svg width="26" height="26" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="5.5" rx="1.4" fill="#60a5fa"/><rect x="11" y="3" width="10" height="5.5" rx="1.4" fill="#60a5fa" opacity=".55"/><rect x="3" y="9.5" width="10" height="5.5" rx="1.4" fill="#60a5fa" opacity=".35"/><circle cx="17" cy="18.5" r="3.3" fill="#fff"/></svg>',
+    rec: () => ({ v: load('bbBest', 0), k: '최고 점수' }),
+    mount() {
+      const wrap = el('div'); wrap.id = 'bbBoard';
+      canvas = el('canvas'); canvas.id = 'bbCanvas'; ctx = canvas.getContext('2d');
+      wrap.appendChild(canvas); $('#stage').appendChild(wrap);
+
+      const s = load('bb', null);
+      if (s && s.grid && s.grid.length === ROWS) { grid = s.grid; round = s.round || 1; score = s.score || 0; ballCount = s.ballCount || 1; over = false; }
+      else freshGrid();
+      phase = 'aim'; active = []; queue = 0; dragging = false;
+      hud(); layout(); persist();          /* hud 를 먼저 채워야 무대 높이가 제대로 나온다 */
+
+      canvas.addEventListener('pointerdown', onDown);
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+      window.addEventListener('pointercancel', onUp);
+      lastT = 0; raf = requestAnimationFrame(loop);
+
+      if (!load('bbSeen', false)) { save('bbSeen', true); setTimeout(() => toast('화면을 위로 끌었다 놓으면 발사!'), 300); }
+    },
+    relayout() { layout(); },
+    unmount() {
+      if (raf) cancelAnimationFrame(raf); raf = null;
+      canvas.removeEventListener('pointerdown', onDown);
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+      persist();
     }
   };
 })();

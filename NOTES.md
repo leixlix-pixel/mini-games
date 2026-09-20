@@ -1,6 +1,7 @@
 # mini-games — 설계 노트
 
-2026-09-12 에 만들었다. 광고 없는 폰용 퍼즐 모음.
+2026-09-12 에 만들었다. 2026-09-20 에 구슬 벽돌깨기(다섯 번째 게임, 캔버스 물리)를 더했다.
+광고 없는 폰용 퍼즐 모음.
 **파일 하나(`index.html`)가 전부다.** 빌드도, 서버도, 외부 라이브러리도 없다.
 깃허브 저장소 `leixlix-pixel/mini-games` → GitHub Pages 로 그대로 나간다.
 
@@ -52,12 +53,16 @@
 
 - 화면 둘: `#home` 과 `#play`. `openGame(key)` / `closeGame()` 하나로 갈아 끼운다.
   안드로이드 뒤로가기 버튼은 `history.pushState` + `popstate` 로 받는다.
-- 게임 넷은 각자 IIFE 안에 갇혀 있고 `GAMES[key] = {name, desc, tint, icon, rec, mount, relayout, unmount}`
+- 게임 다섯은 각자 IIFE 안에 갇혀 있고 `GAMES[key] = {name, desc, tint, icon, rec, mount, relayout, unmount}`
   하나만 밖으로 내놓는다. 서로의 변수를 못 본다(같은 이름의 `place`·`prev`·`over` 가 겹쳐 있다).
 - 위 칸(`setHud`)·상단 버튼 둘(`setAct`)·아래 칸(`#tray`)은 게임이 빌려 쓴다.
-- 저장은 `qp.<키>` 하나씩: `qp.ws`(물병) `qp.tg`(2048) `qp.sd`(스도쿠) `qp.bp`(블록),
-  최고 기록은 `qp.wsBest` `qp.tgBest` `qp.sdBest_<난이도>` `qp.sdDone` `qp.bpBest`.
+- 저장은 `qp.<키>` 하나씩: `qp.ws`(물병) `qp.tg`(2048) `qp.sd`(스도쿠) `qp.bp`(블록) `qp.bb`(구슬 벽돌깨기),
+  최고 기록은 `qp.wsBest` `qp.tgBest` `qp.sdBest_<난이도>` `qp.sdDone` `qp.bpBest` `qp.bbBest`.
   판을 끝내면 진행 상태는 지우고 기록만 남긴다.
+- **구슬 벽돌깨기만 DOM 대신 `<canvas>`+`requestAnimationFrame` 물리 루프다.** 나머지 넷은
+  CSS 트랜지션으로 충분해서 안 썼다. `mount()` 도 `hud()` 를 `layout()` 보다 먼저 불러야
+  하는 규칙(아래)은 이 게임도 똑같이 따른다 — 처음엔 반대로 짰다가 판이 위아래 칸만큼
+  넘치는 것을 발견하고 고쳤다.
 - 소리는 Web Audio 오실레이터 하나(`snd`), 진동은 `navigator.vibrate`(아이폰은 무시한다).
 
 ## 손볼 때 확인할 것
