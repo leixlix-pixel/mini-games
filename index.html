@@ -1369,8 +1369,9 @@ document.addEventListener('pointerdown', function wake() {
   let cell = 30, boardW = 0, boardH = 0, launchY = 0, canvasH = 0, ballR = 5, speed = 300;
   let canvas = null, ctx = null, raf = null, lastT = 0;
   let phase = 'aim';               // 'aim' | 'fire'
-  let aimDx = 0, aimDy = -1, dragging = false;
-  let queue = 0, active = [], launchTimer = 0;
+  let aimDx = 0, aimDy = -1, dragging = false, dragPhase = null;
+  let queue = 0, active = [], launchTimer = 0, shotX = 0;
+  let paddle = { x: null, w: 0, h: 0 };
 
   /* ---- 판 만들기 ---- */
   function genRow() {
@@ -1407,19 +1408,29 @@ document.addEventListener('pointerdown', function wake() {
   /* ---- 발사 ---- */
   function fire() {
     if (phase !== 'aim' || over) return;
-    phase = 'fire'; queue = ballCount; active = []; launchTimer = 0;
+    phase = 'fire'; queue = ballCount; active = []; launchTimer = 0; shotX = paddle.x;
     snd('pick');
   }
-  function spawnBall() { active.push({ x: boardW / 2, y: launchY - ballR - 1, dx: aimDx, dy: aimDy }); }
+  function spawnBall() { active.push({ x: shotX, y: launchY - ballR - 1, dx: aimDx, dy: aimDy }); }
   const staggerMs = () => Math.max(26, 85 - ballCount);
 
+  /* 패들에 맞으면 튕겨 올라가고, 못 맞으면 그대로 화면 밖으로 떨어져 나간다 */
   function stepBall(b, dt) {
     b.x += b.dx * speed * dt; b.y += b.dy * speed * dt;
     if (b.x < ballR) { b.x = ballR; b.dx = Math.abs(b.dx); }
     else if (b.x > boardW - ballR) { b.x = boardW - ballR; b.dx = -Math.abs(b.dx); }
     if (b.y < ballR) { b.y = ballR; b.dy = Math.abs(b.dy); }
     collideBrick(b);
-    return b.y - ballR > launchY;        /* 발사선 아래로 완전히 내려가야 회수된다 */
+    if (b.dy > 0 && b.y + ballR >= launchY && b.y - ballR <= launchY + paddle.h) {
+      if (Math.abs(b.x - paddle.x) <= paddle.w / 2 + ballR) {
+        const off = clamp((b.x - paddle.x) / (paddle.w / 2), -1, 1);
+        const ang = off * 60 * Math.PI / 180;
+        b.dx = Math.sin(ang); b.dy = -Math.cos(ang);
+        b.y = launchY - ballR;
+        snd('pour'); buzz(8);
+      }
+    }
+    return b.y - ballR > canvasH;        /* 패들을 못 맞히고 화면 밖까지 떨어지면 회수 */
   }
   function collideBrick(b) {
     const col0 = Math.max(0, Math.floor((b.x - ballR) / cell)), col1 = Math.min(COLS - 1, Math.floor((b.x + ballR) / cell));
@@ -1454,16 +1465,34 @@ document.addEventListener('pointerdown', function wake() {
     hudVal(0, score);
   }
 
-  /* ---- 조준 ---- */
+  /* ---- 조준·패들 ---- */
   function toLocal(e) { const r = canvas.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
-  function updateAim(e) {
-    const p = toLocal(e);
-    const ang = clamp(Math.atan2(p.x - boardW / 2, launchY - p.y), -75 * Math.PI / 180, 75 * Math.PI / 180);
+  function updateAim(p) {
+    const ang = clamp(Math.atan2(p.x - paddle.x, launchY - p.y), -75 * Math.PI / 180, 75 * Math.PI / 180);
     aimDx = Math.sin(ang); aimDy = -Math.cos(ang);
   }
-  function onDown(e) { if (phase !== 'aim' || over) return; dragging = true; updateAim(e); }
-  function onMove(e) { if (dragging) updateAim(e); }
-  function onUp() { if (!dragging) return; dragging = false; fire(); }
+  function updatePaddle(p) { paddle.x = clamp(p.x, paddle.w / 2, boardW - paddle.w / 2); }
+
+  /* 쏘기 전엔 화면 아무 데나 끌어 조준하고 놓으면 발사, 쏜 뒤엔 같은 드래그가 패들을 끈다 —
+     드래그 시작 시점의 phase 로 고정한다(발사 직후 settle 로 바뀌는 찰나에 onUp 이 다시
+     발사되는 것을 막는다). */
+  function onDown(e) {
+    if (over || (phase !== 'aim' && phase !== 'fire')) return;
+    dragging = true; dragPhase = phase;
+    const p = toLocal(e);
+    if (dragPhase === 'aim') updateAim(p); else updatePaddle(p);
+  }
+  function onMove(e) {
+    if (!dragging) return;
+    const p = toLocal(e);
+    if (dragPhase === 'aim') updateAim(p); else updatePaddle(p);
+  }
+  function onUp() {
+    if (!dragging) return;
+    dragging = false;
+    if (dragPhase === 'aim') fire();
+    dragPhase = null;
+  }
 
   /* ---- 루프 ---- */
   function loop(t) {
@@ -1523,17 +1552,13 @@ document.addEventListener('pointerdown', function wake() {
     ctx.beginPath(); ctx.moveTo(0, (ROWS - 1) * cell); ctx.lineTo(boardW, (ROWS - 1) * cell); ctx.stroke();
     for (let row = 0; row < ROWS; row++) for (let col = 0; col < COLS; col++) { const c = grid[row][col]; if (c) drawCell(c, col * cell, row * cell); }
 
-    ctx.fillStyle = '#60a5fa';
-    ctx.beginPath();
-    ctx.moveTo(boardW / 2 - cell * .22, launchY + cell * .28);
-    ctx.lineTo(boardW / 2 + cell * .22, launchY + cell * .28);
-    ctx.lineTo(boardW / 2, launchY - cell * .05);
-    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#f472b6';
+    roundRect(paddle.x - paddle.w / 2, launchY, paddle.w, paddle.h, paddle.h / 2); ctx.fill();
 
     if (phase === 'aim') {
       ctx.setLineDash([6, 7]); ctx.strokeStyle = 'rgba(255,255,255,.55)'; ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.moveTo(boardW / 2, launchY);
-      ctx.lineTo(boardW / 2 + aimDx * Math.min(boardH * .55, 260), launchY + aimDy * Math.min(boardH * .55, 260));
+      ctx.beginPath(); ctx.moveTo(paddle.x, launchY);
+      ctx.lineTo(paddle.x + aimDx * Math.min(boardH * .55, 260), launchY + aimDy * Math.min(boardH * .55, 260));
       ctx.stroke(); ctx.setLineDash([]);
     }
     ctx.fillStyle = '#fff';
@@ -1550,6 +1575,8 @@ document.addEventListener('pointerdown', function wake() {
     canvas.width = boardW; canvas.height = canvasH;
     canvas.style.width = boardW + 'px'; canvas.style.height = canvasH + 'px';
     ballR = Math.max(3, cell * .15); speed = cell * 9;
+    paddle.w = cell * 2.3; paddle.h = Math.max(6, cell * .28);
+    paddle.x = paddle.x == null ? boardW / 2 : clamp(paddle.x, paddle.w / 2, boardW - paddle.w / 2);
   }
   function persist() { if (over) { drop('bb'); return; } save('bb', { grid, round, score, ballCount }); }
   function hud() {
@@ -1560,7 +1587,7 @@ document.addEventListener('pointerdown', function wake() {
     setAct('B', {
       t: '⟳ 새로', fn: () => modal({
         em: '🔄', h: '새로 시작', p: '지금 판을 버리고 처음부터 합니다.',
-        btns: [{ t: '새 판', cls: 'primary', fn: () => { freshGrid(); phase = 'aim'; hud(); persist(); } }, { t: '그만두기' }]
+        btns: [{ t: '새 판', cls: 'primary', fn: () => { freshGrid(); paddle.x = boardW / 2; phase = 'aim'; hud(); persist(); } }, { t: '그만두기' }]
       })
     });
   }
@@ -1572,13 +1599,13 @@ document.addEventListener('pointerdown', function wake() {
     modal({
       em: '💥', h: '바닥에 닿았어요',
       p: '라운드 <b>' + round + '</b> · 점수 <b>' + score + '</b>' + (score >= best ? ' · 최고 기록!' : ' · 최고 ' + best),
-      btns: [{ t: '다시 하기', cls: 'primary', fn: () => { freshGrid(); phase = 'aim'; hud(); persist(); } }, { t: '그만하기', fn: () => history.back() }]
+      btns: [{ t: '다시 하기', cls: 'primary', fn: () => { freshGrid(); paddle.x = boardW / 2; phase = 'aim'; hud(); persist(); } }, { t: '그만하기', fn: () => history.back() }]
     });
   }
 
   GAMES.bb = {
     key: 'bb', name: '구슬 벽돌깨기', sub: '튕겨서 벽돌을 부순다',
-    desc: '구슬을 쏘아 벽돌을 깬다. 벽돌이 바닥에 닿기 전에!', tint: '#60a5fa',
+    desc: '한 번 쏘고, 패들을 움직여 구슬을 받아친다', tint: '#60a5fa',
     icon: '<svg width="26" height="26" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="5.5" rx="1.4" fill="#60a5fa"/><rect x="11" y="3" width="10" height="5.5" rx="1.4" fill="#60a5fa" opacity=".55"/><rect x="3" y="9.5" width="10" height="5.5" rx="1.4" fill="#60a5fa" opacity=".35"/><circle cx="17" cy="18.5" r="3.3" fill="#fff"/></svg>',
     rec: () => ({ v: load('bbBest', 0), k: '최고 점수' }),
     mount() {
@@ -1589,7 +1616,7 @@ document.addEventListener('pointerdown', function wake() {
       const s = load('bb', null);
       if (s && s.grid && s.grid.length === ROWS) { grid = s.grid; round = s.round || 1; score = s.score || 0; ballCount = s.ballCount || 1; over = false; }
       else freshGrid();
-      phase = 'aim'; active = []; queue = 0; dragging = false;
+      phase = 'aim'; active = []; queue = 0; dragging = false; dragPhase = null;
       hud(); layout(); persist();          /* hud 를 먼저 채워야 무대 높이가 제대로 나온다 */
 
       canvas.addEventListener('pointerdown', onDown);
@@ -1598,7 +1625,7 @@ document.addEventListener('pointerdown', function wake() {
       window.addEventListener('pointercancel', onUp);
       lastT = 0; raf = requestAnimationFrame(loop);
 
-      if (!load('bbSeen', false)) { save('bbSeen', true); setTimeout(() => toast('화면을 위로 끌었다 놓으면 발사!'), 300); }
+      if (!load('bbSeen', false)) { save('bbSeen', true); setTimeout(() => toast('끌어서 조준하고 놓으면 발사! 쏜 뒤엔 끌어서 패들로 받아쳐요'), 300); }
     },
     relayout() { layout(); },
     unmount() {
