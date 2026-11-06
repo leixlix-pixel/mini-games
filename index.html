@@ -1526,12 +1526,34 @@ document.addEventListener('pointerdown', function wake() {
   let queue = 0, active = [], launchTimer = 0, shotX = 0;
   let paddle = { x: null, w: 0, h: 0 };
 
+  let paused = false, previous = null, particles = [], pointerId = null;
+  function cancelDrag() { dragging = false; dragPhase = null; pointerId = null; }
+  function snapshot() { return JSON.parse(JSON.stringify({grid, round, score, ballCount})); }
+  function undo() {
+    if (!previous) return;
+    closeModal(); const s = previous; previous = null;
+    grid = s.grid; round = s.round; score = s.score; ballCount = s.ballCount;
+    over = false; paused = false; phase = 'aim'; active = []; queue = 0; particles = [];
+    cancelDrag(); hud(); persist();
+  }
+  function controls() {
+    const label = paused ? '▶ 계속' : 'Ⅱ 쉬기';
+    if ($('#bbPause').textContent !== label) $('#bbPause').textContent = label;
+    const disabled = phase !== 'fire' || paused;
+    if ($('#bbRecall').disabled !== disabled) $('#bbRecall').disabled = disabled;
+    const status = paused ? '쉬는 중 · 계속을 누르면 이어져요' :
+      phase === 'fire' ? '패들을 끌어 받아쳐요 · 남은 구슬 ' + (active.length + queue) :
+      over ? '되돌리기로 마지막 발사를 다시 해봐요' : '끌어서 조준 · 손을 놓으면 발사';
+    if ($('#bbStatus').textContent !== status) $('#bbStatus').textContent = status;
+  }
+  function visibility() { if (document.hidden) { paused = true; cancelDrag(); } lastT = 0; controls(); }
+
   /* ---- 판 만들기 ---- */
   function genRow() {
     const row = new Array(COLS).fill(null);
     const fillChance = Math.min(0.5 + round * 0.012, 0.88);
     const maxHp = Math.min(2 + Math.floor(round / 2), 40);
-    const minHp = Math.max(1, Math.floor(round / 5));
+    const minHp = Math.min(maxHp, Math.max(1, Math.floor(round / 5)));
     let any = false;
     for (let c = 0; c < COLS; c++) {
       if (Math.random() >= fillChance) continue;
@@ -1545,6 +1567,7 @@ document.addEventListener('pointerdown', function wake() {
     return row;
   }
   function freshGrid() {
+    previous = null; paused = false; active = []; queue = 0; particles = []; cancelDrag();
     grid = Array.from({ length: ROWS }, () => new Array(COLS).fill(null));
     round = 1; score = 0; ballCount = 1; over = false;
     grid[0] = genRow(); grid[1] = genRow(); grid[2] = genRow();
@@ -1558,15 +1581,16 @@ document.addEventListener('pointerdown', function wake() {
     const popped = grid[ROWS - 1];               /* 발사대에 가장 가까운 줄 — 여기 벽돌이 있으면 끝 */
     grid = grid.slice(0, ROWS - 1);
     grid.unshift(genRow());
-    if (popped && popped.some(Boolean)) { gameOver(); return; }
+    if (popped && popped.some(c => c && c.t === 'b')) { gameOver(); return; }
     phase = 'aim'; persist(); hud();
   }
 
   /* ---- 발사 ---- */
   function fire() {
-    if (phase !== 'aim' || over) return;
+    if (phase !== 'aim' || over || paused) return;
+    previous = snapshot(); persist();
     phase = 'fire'; queue = ballCount; active = []; launchTimer = 0; shotX = paddle.x;
-    snd('pick');
+    snd('pick'); hud();
   }
   function spawnBall() { active.push({ x: shotX, y: launchY - ballR - 1, dx: aimDx, dy: aimDy }); }
   const staggerMs = () => Math.max(26, 85 - ballCount);
@@ -1583,6 +1607,8 @@ document.addEventListener('pointerdown', function wake() {
         const off = clamp((b.x - paddle.x) / (paddle.w / 2), -1, 1);
         const ang = off * 60 * Math.PI / 180;
         b.dx = Math.sin(ang); b.dy = -Math.cos(ang);
+        // 정중앙으로 계속 받더라도 빈 세로 통로에 영원히 갇히지 않는다.
+        if (Math.abs(b.dx) < .12) { b.dx = off < 0 ? -.12 : .12; b.dy = -Math.sqrt(1-b.dx*b.dx); }
         b.y = launchY - ballR;
         snd('pour'); buzz(8);
       }
@@ -1611,10 +1637,17 @@ document.addEventListener('pointerdown', function wake() {
         const cx = clamp(b.x, rx, rx + cell), cy = clamp(b.y, ry, ry + cell);
         const dx = b.x - cx, dy = b.y - cy, d2 = dx * dx + dy * dy;
         if (d2 >= ballR * ballR) continue;
-        const d = Math.sqrt(d2) || 0.001, nx = dx / d, ny = dy / d;
+        let d = Math.sqrt(d2), nx, ny;
+        if (d > 0) { nx = dx / d; ny = dy / d; }
+        else {
+          const faces = [ [Math.abs(b.x-rx),-1,0], [Math.abs(rx+cell-b.x),1,0],
+            [Math.abs(b.y-ry),0,-1], [Math.abs(ry+cell-b.y),0,1] ];
+          faces.sort((a,b)=>a[0]-b[0]); [,nx,ny] = faces[0];
+          b.x += nx * (faces[0][0] + ballR); b.y += ny * (faces[0][0] + ballR);
+        }
         const dot = b.dx * nx + b.dy * ny;
-        b.dx -= 2 * dot * nx; b.dy -= 2 * dot * ny;
-        b.x = cx + nx * ballR; b.y = cy + ny * ballR;
+        if (dot < 0) { b.dx -= 2 * dot * nx; b.dy -= 2 * dot * ny; }
+        if (d > 0) { b.x = cx + nx * (ballR + .01); b.y = cy + ny * (ballR + .01); }
         hitCell(row, col);
         return;                                   /* 한 프레임에 한 벽돌만 — 겹친 벽돌은 다음 프레임에 */
       }
@@ -1627,11 +1660,18 @@ document.addEventListener('pointerdown', function wake() {
       if (c.hp <= 0) { grid[row][col] = null; score += 10; snd('clear'); }
       else score += 2;
     } else if (c.t === 'p') {
-      grid[row][col] = null; ballCount += c.n; queue += c.n; score += 5; snd('good'); toast('공 +' + c.n);
+      const added = Math.min(c.n, Math.max(0, 60 - ballCount));
+      grid[row][col] = null; ballCount += added; queue += added;
+      score += 5 + (c.n - added) * 10; snd('good');
+      toast(added ? '공 +' + added : '공 60개 · 보너스 점수 +' + (5 + c.n * 10));
     } else if (c.t === 's') {
       grid[row][col] = null; score += c.v; snd('good');
     }
-    hudVal(0, score);
+    if (!grid[row][col]) for (let i=0; i<7 && particles.length<100; i++) {
+      const a=Math.random()*Math.PI*2;
+      particles.push({x:(col+.5)*cell,y:(row+.5)*cell,dx:Math.cos(a)*cell*2,dy:Math.sin(a)*cell*2,life:.4});
+    }
+    hudVal(0, score); hudVal(2, ballCount);
   }
 
   /* ---- 조준·패들 ---- */
@@ -1646,40 +1686,44 @@ document.addEventListener('pointerdown', function wake() {
      드래그 시작 시점의 phase 로 고정한다(발사 직후 settle 로 바뀌는 찰나에 onUp 이 다시
      발사되는 것을 막는다). */
   function onDown(e) {
-    if (over || (phase !== 'aim' && phase !== 'fire')) return;
+    if (paused || dragging || over || (phase !== 'aim' && phase !== 'fire')) return;
+    pointerId = e.pointerId; canvas.setPointerCapture(e.pointerId);
     dragging = true; dragPhase = phase;
     const p = toLocal(e);
     if (dragPhase === 'aim') updateAim(p); else updatePaddle(p);
   }
   function onMove(e) {
-    if (!dragging) return;
+    if (!dragging || e.pointerId !== pointerId) return;
     const p = toLocal(e);
     if (dragPhase === 'aim') updateAim(p); else updatePaddle(p);
   }
-  function onUp() {
-    if (!dragging) return;
+  function onUp(e) {
+    if (!dragging || e.pointerId !== pointerId) return;
     dragging = false;
     if (dragPhase === 'aim') fire();
-    dragPhase = null;
+    dragPhase = null; pointerId = null;
   }
 
   /* ---- 루프 ---- */
   function loop(t) {
     if (!lastT) lastT = t;
     const dt = Math.min((t - lastT) / 1000, 0.032); lastT = t;
-    if (phase === 'fire') {
+    if (phase === 'fire' && !paused && !veilNode) {
       if (queue > 0) {
         launchTimer -= dt * 1000;
         if (launchTimer <= 0) { spawnBall(); queue--; launchTimer = staggerMs(); }
       }
-      for (let i = active.length - 1; i >= 0; i--) if (stepBall(active[i], dt)) active.splice(i, 1);
+      const steps = Math.max(1, Math.ceil(speed * dt / (ballR * .65)));
+      for (let n=0; n<steps; n++)
+        for (let i = active.length - 1; i >= 0; i--) if (stepBall(active[i], dt / steps)) active.splice(i, 1);
       if (gridEmpty()) {                    /* 더 깰 벽돌이 없으면 굳이 공을 놓칠 때까지 기다리지 않는다 */
         phase = 'settle'; queue = 0; active = [];
         score += 30 + round * 4; snd('win'); toast('판을 다 깼어요!');
-        setTimeout(nextRound, 200);
-      } else if (queue <= 0 && active.length === 0) { phase = 'settle'; setTimeout(nextRound, 120); }
+        nextRound();
+      } else if (queue <= 0 && active.length === 0) { phase = 'settle'; nextRound(); }
     }
-    draw();
+    if (!paused) particles = particles.filter(p => { p.life -= dt; p.x += p.dx*dt; p.y += p.dy*dt; return p.life > 0; });
+    controls(); draw();
     raf = requestAnimationFrame(loop);
   }
 
@@ -1731,32 +1775,50 @@ document.addEventListener('pointerdown', function wake() {
     if (phase === 'aim') {
       ctx.setLineDash([6, 7]); ctx.strokeStyle = 'rgba(255,255,255,.55)'; ctx.lineWidth = 2;
       ctx.beginPath(); ctx.moveTo(paddle.x, launchY);
-      ctx.lineTo(paddle.x + aimDx * Math.min(boardH * .55, 260), launchY + aimDy * Math.min(boardH * .55, 260));
+      let x=paddle.x, y=launchY-ballR-1, dx=aimDx, dy=aimDy;
+      for(let i=0;i<500;i++) {
+        x += dx*cell*.06; y += dy*cell*.06;
+        if(x<ballR || x>boardW-ballR) { x=clamp(x,ballR,boardW-ballR); dx=-dx; }
+        ctx.lineTo(x,y);
+        if(y<=ballR) break;
+        let hit=false;
+        for(let r=Math.max(0,Math.floor((y-ballR)/cell));r<=Math.min(ROWS-1,Math.floor((y+ballR)/cell));r++)
+          for(let c=Math.max(0,Math.floor((x-ballR)/cell));c<=Math.min(COLS-1,Math.floor((x+ballR)/cell));c++)
+            if(grid[r][c] && Math.hypot(x-clamp(x,c*cell,(c+1)*cell),y-clamp(y,r*cell,(r+1)*cell))<=ballR) hit=true;
+        if(hit) break;
+      }
       ctx.stroke(); ctx.setLineDash([]);
     }
+    for(const p of particles) { ctx.globalAlpha=p.life/.4; ctx.fillStyle='#93c5fd'; ctx.fillRect(p.x,p.y,3,3); }
+    ctx.globalAlpha=1;
     ctx.fillStyle = '#fff';
     active.forEach(b => { ctx.beginPath(); ctx.arc(b.x, b.y, ballR, 0, Math.PI * 2); ctx.fill(); });
   }
 
   /* ---- 배치·저장 ---- */
   function layout() {
+    const oldCell = cell, oldW = boardW;
     const bx = stageBox();
     const w = Math.min(bx.w, 420);
-    cell = Math.max(24, Math.min(Math.floor(w / COLS), Math.floor(bx.h / (ROWS + LAUNCH_GAP_ROWS))));
+    cell = Math.max(8, Math.min(Math.floor(w / COLS), Math.floor(bx.h / (ROWS + LAUNCH_GAP_ROWS))));
     boardW = cell * COLS; boardH = cell * ROWS; launchY = boardH;
     canvasH = boardH + Math.round(cell * LAUNCH_GAP_ROWS);
-    canvas.width = boardW; canvas.height = canvasH;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.round(boardW*dpr); canvas.height = Math.round(canvasH*dpr);
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    if(oldW) { const ratio=cell/oldCell; active.forEach(b=>{b.x*=ratio;b.y*=ratio;}); paddle.x*=ratio; shotX*=ratio; }
+    particles=[];
     canvas.style.width = boardW + 'px'; canvas.style.height = canvasH + 'px';
     ballR = Math.max(3, cell * .15); speed = cell * 9;
     paddle.w = cell * 2.3; paddle.h = Math.max(6, cell * .28);
     paddle.x = paddle.x == null ? boardW / 2 : clamp(paddle.x, paddle.w / 2, boardW - paddle.w / 2);
   }
-  function persist() { if (over) { drop('bb'); return; } save('bb', { grid, round, score, ballCount }); }
+  function persist() { if (over) { drop('bb'); return; } save('bb', { grid, round, score, ballCount, previous }); }
   function hud() {
     const best = Math.max(load('bbBest', 0), score);
     if (score > load('bbBest', 0)) save('bbBest', score);
     setHud([{ k: '점수', v: score }, { k: '라운드', v: round }, { k: '공', v: ballCount }, { k: '최고 점수', v: best, hi: true }]);
-    setAct('A', null);
+    setAct('A', {t:'↶ 되돌리기', off:!previous, fn:undo});
     setAct('B', {
       t: '⟳ 새로', fn: () => modal({
         em: '🔄', h: '새로 시작', p: '지금 판을 버리고 처음부터 합니다.',
@@ -1772,7 +1834,7 @@ document.addEventListener('pointerdown', function wake() {
     modal({
       em: '💥', h: '바닥에 닿았어요',
       p: '라운드 <b>' + round + '</b> · 점수 <b>' + score + '</b>' + (score >= best ? ' · 최고 기록!' : ' · 최고 ' + best),
-      btns: [{ t: '다시 하기', cls: 'primary', fn: () => { freshGrid(); paddle.x = boardW / 2; phase = 'aim'; hud(); persist(); } }, { t: '그만하기', fn: () => history.back() }]
+      btns: [...(previous ? [{t:'↶ 한 수 되돌리기', cls:'primary', fn:undo}] : []), { t: '다시 하기', cls: 'primary', fn: () => { freshGrid(); paddle.x = boardW / 2; phase = 'aim'; hud(); persist(); } }, { t: '그만하기', fn: () => history.back() }]
     });
   }
 
@@ -1786,7 +1848,10 @@ document.addEventListener('pointerdown', function wake() {
       canvas = el('canvas'); canvas.id = 'bbCanvas'; ctx = canvas.getContext('2d');
       wrap.appendChild(canvas); $('#stage').appendChild(wrap);
 
-      const s = load('bb', null);
+      $('#tray').innerHTML = '<div style="display:flex;gap:8px;justify-content:center"><button class="btn" id="bbPause">Ⅱ 쉬기</button><button class="btn" id="bbRecall">↓ 구슬 회수</button></div><div id="bbStatus" style="text-align:center;font-size:13px;color:var(--muted);margin-top:6px"></div>';
+      $('#bbPause').onclick = () => { paused = !paused; cancelDrag(); lastT=0; controls(); };
+      $('#bbRecall').onclick = () => { if(phase==='fire' && !paused) { active=[];queue=0;cancelDrag();nextRound(); } };
+      const s = load('bb', null); previous = s && s.previous || null; paused=false; particles=[];
       if (s && s.grid && s.grid.length === ROWS) { grid = s.grid; round = s.round || 1; score = s.score || 0; ballCount = s.ballCount || 1; over = false; }
       else freshGrid();
       phase = 'aim'; active = []; queue = 0; dragging = false; dragPhase = null;
@@ -1795,8 +1860,9 @@ document.addEventListener('pointerdown', function wake() {
       canvas.addEventListener('pointerdown', onDown);
       window.addEventListener('pointermove', onMove);
       window.addEventListener('pointerup', onUp);
-      window.addEventListener('pointercancel', onUp);
-      lastT = 0; raf = requestAnimationFrame(loop);
+      window.addEventListener('pointercancel', cancelDrag);
+      document.addEventListener('visibilitychange', visibility);
+      controls(); draw(); lastT = 0; raf = requestAnimationFrame(loop);
 
       if (!load('bbSeen', false)) { save('bbSeen', true); setTimeout(() => toast('끌어서 조준하고 놓으면 발사! 쏜 뒤엔 끌어서 패들로 받아쳐요'), 300); }
     },
@@ -1806,7 +1872,8 @@ document.addEventListener('pointerdown', function wake() {
       canvas.removeEventListener('pointerdown', onDown);
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
-      window.removeEventListener('pointercancel', onUp);
+      window.removeEventListener('pointercancel', cancelDrag);
+      document.removeEventListener('visibilitychange', visibility); cancelDrag();
       persist();
     }
   };
