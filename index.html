@@ -1855,7 +1855,7 @@ document.addEventListener('pointerdown', function wake() {
       if (s && s.grid && s.grid.length === ROWS) { grid = s.grid; round = s.round || 1; score = s.score || 0; ballCount = s.ballCount || 1; over = false; }
       else freshGrid();
       phase = 'aim'; active = []; queue = 0; dragging = false; dragPhase = null;
-      hud(); layout(); persist();          /* hud 를 먼저 채워야 무대 높이가 제대로 나온다 */
+      hud(); controls(); layout(); persist(); /* HUD와 아래 안내를 먼저 채워 무대 높이를 잰다 */
 
       canvas.addEventListener('pointerdown', onDown);
       window.addEventListener('pointermove', onMove);
